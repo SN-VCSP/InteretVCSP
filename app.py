@@ -28,6 +28,9 @@ import base64
 from dataclasses import dataclass
 from enum import Enum
 import certifi
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION DE LA PAGE
@@ -490,8 +493,10 @@ def format_semester_label(anchor: date) -> str:
 
 def http_get_text(url: str, timeout: int = 20) -> str:
     """Requête HTTPS robuste avec gestion SSL."""
+    # Bypass SSL verification for internal/corporate networks
     ctx = ssl.create_default_context()
-    ctx.load_verify_locations(cafile=certifi.where())
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
     
     handlers = []
     proxies = urllib.request.getproxies()
@@ -1180,6 +1185,97 @@ def generate_csv_export(resultat: ResultatCalcul, libelle: str) -> str:
     return output.getvalue()
 
 
+def generate_excel_export(resultat: ResultatCalcul, libelle: str) -> bytes:
+    """Génère un export Excel (.xlsx) stylisé."""
+    output = io.BytesIO()
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Calcul Intérêts"
+    
+    # Styles
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="0B3DAA", end_color="0B3DAA", fill_type="solid")
+    center_align = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    
+    # En-tête principal
+    sheet["A1"] = "CALCULATEUR D'INTÉRÊTS DE RETARD"
+    sheet["A1"].font = Font(bold=True, size=14, color="0B3DAA")
+    sheet.merge_cells("A1:G1")
+    
+    # Infos facture
+    sheet["A3"] = "Libellé :"
+    sheet["B3"] = libelle
+    sheet["A4"] = "Montant principal :"
+    sheet["B4"] = float(resultat.montant_principal)
+    sheet["B4"].number_format = '#,##0.00 €'
+    sheet["A5"] = "Type client :"
+    sheet["B5"] = "Privé" if resultat.client_type == ClientType.PRIVE else "Public"
+    sheet["A6"] = "Date échéance :"
+    sheet["B6"] = resultat.date_echeance
+    sheet["B6"].number_format = 'dd/mm/yyyy'
+    sheet["A7"] = "Date paiement :"
+    sheet["B7"] = resultat.date_paiement
+    sheet["B7"].number_format = 'dd/mm/yyyy'
+    sheet["A8"] = "Jours de retard :"
+    sheet["B8"] = resultat.jours_retard
+
+    for cell in sheet["A3:A8"]:
+        cell[0].font = Font(bold=True)
+    
+    # Tableau - En-têtes
+    headers = ["Début", "Fin", "Jours", "Taux BCE", "Majoration", "Taux appliqué", "Intérêts"]
+    for col_num, header in enumerate(headers, 1):
+        cell = sheet.cell(row=10, column=col_num, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = thin_border
+    
+    # Tableau - Données
+    row_idx = 11
+    for seg in resultat.segments:
+        sheet.cell(row=row_idx, column=1, value=seg.debut).number_format = 'dd/mm/yyyy'
+        sheet.cell(row=row_idx, column=2, value=seg.fin).number_format = 'dd/mm/yyyy'
+        sheet.cell(row=row_idx, column=3, value=seg.jours)
+        sheet.cell(row=row_idx, column=4, value=seg.taux_bce / 100).number_format = '0.00%'
+        sheet.cell(row=row_idx, column=5, value=seg.majoration)
+        sheet.cell(row=row_idx, column=6, value=seg.taux_applique / 100).number_format = '0.00%'
+        sheet.cell(row=row_idx, column=7, value=float(seg.interets)).number_format = '#,##0.00 €'
+        
+        # Bordures
+        for col in range(1, 8):
+            sheet.cell(row=row_idx, column=col).border = thin_border
+        
+        row_idx += 1
+    
+    # Totaux
+    row_idx += 2
+    sheet.cell(row=row_idx, column=6, value="Intérêts totaux :").font = Font(bold=True)
+    sheet.cell(row=row_idx, column=7, value=float(resultat.interets_totaux)).number_format = '#,##0.00 €'
+    
+    row_idx += 1
+    sheet.cell(row=row_idx, column=6, value="Indemnité forfaitaire :").font = Font(bold=True)
+    sheet.cell(row=row_idx, column=7, value=float(resultat.indemnite_forfaitaire)).number_format = '#,##0.00 €'
+    
+    row_idx += 1
+    total_cell_label = sheet.cell(row=row_idx, column=6, value="TOTAL À RÉCLAMER :")
+    total_cell_label.font = Font(bold=True, size=12, color="0B3DAA")
+    
+    total_cell_val = sheet.cell(row=row_idx, column=7, value=float(resultat.total_du))
+    total_cell_val.font = Font(bold=True, size=12, color="0B3DAA")
+    total_cell_val.number_format = '#,##0.00 €'
+
+    # Ajustement colonnes
+    for col in range(1, 8):
+        sheet.column_dimensions[get_column_letter(col)].width = 15
+    sheet.column_dimensions['A'].width = 20
+    sheet.column_dimensions['B'].width = 20
+
+    workbook.save(output)
+    return output.getvalue()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # INTERFACE UTILISATEUR
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1209,7 +1305,7 @@ def render_header():
         # Logo
         logo_path = "assets/logo.png"
         try:
-            st.image(logo_path, width=180)
+            st.image(logo_path, width=240)  # Increased from 180
         except Exception:
             pass
 
@@ -1220,7 +1316,7 @@ def render_sidebar():
         # Logo
         logo_path = "assets/mon_logo.png"
         try:
-            st.image(logo_path, width=150)
+            st.image(logo_path, width=200)  # Increased from 150
         except Exception:
             pass
         
@@ -1293,6 +1389,16 @@ def main():
         st.session_state.resultat = None
     if 'historique' not in st.session_state:
         st.session_state.historique = []
+
+    # Localisation (Tentative)
+    try:
+        import locale
+        locale.setlocale(locale.LC_ALL, 'fr_FR.UTF-8')
+    except:
+        try:
+             locale.setlocale(locale.LC_ALL, 'fra') # Windows
+        except:
+             pass
     
     # Header et sidebar
     render_header()
@@ -1328,12 +1434,25 @@ def main():
         
         date_echeance = st.date_input(
             "Date d'échéance",
-            value=date.today() - timedelta(days=60)
+            value=date.today() - timedelta(days=60),
+            format="DD/MM/YYYY"
         )
         
+        # Calculateur d'échéance (si Public) : Optionnel mais demandé pour les marchés publics
+        with st.expander("🛠️ Calculateur d'échéance (Marchés Publics)"):
+            mp_date_facture = st.date_input("Date de réception facture", value=date.today(), key="mp_date_fact", format="DD/MM/YYYY")
+            mp_delai = st.selectbox("Délai de paiement", options=[30, 50, 60], format_func=lambda x: f"{x} jours")
+            if st.button("Appliquer cette échéance", key="btn_apply_date"):
+                calculated_due_date = mp_date_facture + timedelta(days=mp_delai)
+                st.success(f"Échéance calculée : {calculated_due_date.strftime('%d/%m/%Y')}")
+                # Note: On ne peut pas mettre à jour directement le widget date_input ci-dessus sans rerun/session state complexe. 
+                # On affiche juste l'info pour que l'utilisateur la recopie ou on utilise session_state si on refond le widget.
+                st.info("Veuillez reporter cette date dans le champ 'Date d'échéance' ci-dessus.")
+
         date_paiement = st.date_input(
             "Date de paiement effectif",
-            value=date.today()
+            value=date.today(),
+            format="DD/MM/YYYY"
         )
         
         st.markdown('</div>', unsafe_allow_html=True)
@@ -1544,12 +1663,12 @@ def main():
                 )
             
             with col_exp2:
-                csv_export = generate_csv_export(resultat, libelle)
+                excel_data = generate_excel_export(resultat, libelle)
                 st.download_button(
-                    "📊 Télécharger CSV",
-                    data=csv_export,
-                    file_name=f"interets_retard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv",
+                    "📊 Télécharger EXCEL",
+                    data=excel_data,
+                    file_name=f"interets_retard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
             
